@@ -27,6 +27,9 @@ from sqlmesh.utils.pydantic import PydanticModel
 from tests.conftest import SushiDataValidator
 from tests.core.engine_adapter.integration import TestContext, MetadataResults, TEST_SCHEMA
 
+# for tests that cant run in parallel because they do things like expect hardcoded non-dynamic schema names to exist
+sequential = pytest.mark.xdist_group("sequential")
+
 
 class PlanResults(PydanticModel):
     plan: Plan
@@ -210,18 +213,18 @@ def test_type(request):
             ],
         ),
         pytest.param(
-            "athena",
-            marks=[
-                pytest.mark.engine,
-                pytest.mark.remote,
-                pytest.mark.athena,
-                pytest.mark.xdist_group("engine_integration_athena"),
-            ],
+            "athena_hive",
+            marks=[pytest.mark.engine, pytest.mark.remote, pytest.mark.athena],
+        ),
+        pytest.param(
+            "athena_iceberg",
+            marks=[pytest.mark.engine, pytest.mark.remote, pytest.mark.athena],
         ),
     ]
 )
 def mark_gateway(request) -> t.Tuple[str, str]:
-    return request.param, f"inttest_{request.param}"
+    gateway = "athena" if "athena" in request.param else request.param
+    return request.param, f"inttest_{gateway}"
 
 
 @pytest.fixture
@@ -338,7 +341,9 @@ def test_temp_table(ctx: TestContext):
     )
     table = ctx.table("example")
 
-    with ctx.engine_adapter.temp_table(ctx.input_data(input_data), table.sql()) as table_name:
+    with ctx.engine_adapter.temp_table(
+        ctx.input_data(input_data), table.sql(), table_format=ctx.default_table_format
+    ) as table_name:
         results = ctx.get_metadata_results()
         assert len(results.views) == 0
         assert len(results.tables) == 1
@@ -358,6 +363,7 @@ def test_create_table(ctx: TestContext):
         {"id": exp.DataType.build("int")},
         table_description="test table description",
         column_descriptions={"id": "test id column description"},
+        table_format=ctx.default_table_format,
     )
     results = ctx.get_metadata_results()
     assert len(results.tables) == 1
@@ -387,6 +393,7 @@ def test_ctas(ctx: TestContext):
         ctx.input_data(input_data),
         table_description="test table description",
         column_descriptions={"id": "test id column description"},
+        table_format=ctx.default_table_format,
     )
     results = ctx.get_metadata_results()
     assert len(results.views) == 0
@@ -553,7 +560,9 @@ def test_replace_query(ctx: TestContext):
             {"id": 3, "ds": "2022-01-03"},
         ]
     )
-    ctx.engine_adapter.create_table(table, ctx.columns_to_types)
+    ctx.engine_adapter.create_table(
+        table, ctx.columns_to_types, table_format=ctx.default_table_format
+    )
     ctx.engine_adapter.replace_query(
         table,
         ctx.input_data(input_data),
@@ -562,6 +571,7 @@ def test_replace_query(ctx: TestContext):
         # exist prior to evaluation but when running these tests that isn't the case. As a result we just pass in
         # columns_to_types for these two engines so we can still test inference on the other ones
         columns_to_types=ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None,
+        table_format=ctx.default_table_format,
     )
     results = ctx.get_metadata_results()
     assert len(results.views) == 0
@@ -585,6 +595,7 @@ def test_replace_query(ctx: TestContext):
             columns_to_types=(
                 ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None
             ),
+            table_format=ctx.default_table_format,
         )
         results = ctx.get_metadata_results()
         assert len(results.views) == 0
@@ -606,7 +617,9 @@ def test_replace_query_batched(ctx: TestContext):
             {"id": 3, "ds": "2022-01-03"},
         ]
     )
-    ctx.engine_adapter.create_table(table, ctx.columns_to_types)
+    ctx.engine_adapter.create_table(
+        table, ctx.columns_to_types, table_format=ctx.default_table_format
+    )
     ctx.engine_adapter.replace_query(
         table,
         ctx.input_data(input_data),
@@ -615,6 +628,7 @@ def test_replace_query_batched(ctx: TestContext):
         # exist prior to evaluation but when running these tests that isn't the case. As a result we just pass in
         # columns_to_types for these two engines so we can still test inference on the other ones
         columns_to_types=ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None,
+        table_format=ctx.default_table_format,
     )
     results = ctx.get_metadata_results()
     assert len(results.views) == 0
@@ -638,6 +652,7 @@ def test_replace_query_batched(ctx: TestContext):
             columns_to_types=(
                 ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None
             ),
+            table_format=ctx.default_table_format,
         )
         results = ctx.get_metadata_results()
         assert len(results.views) == 0
@@ -650,7 +665,9 @@ def test_replace_query_batched(ctx: TestContext):
 def test_insert_append(ctx: TestContext):
     ctx.init()
     table = ctx.table("test_table")
-    ctx.engine_adapter.create_table(table, ctx.columns_to_types)
+    ctx.engine_adapter.create_table(
+        table, ctx.columns_to_types, table_format=ctx.default_table_format
+    )
     # Initial Load
     input_data = pd.DataFrame(
         [
@@ -705,6 +722,7 @@ def test_insert_overwrite_by_time_partition(ctx: TestContext):
         ctx.columns_to_types,
         partitioned_by=partitioned_by,
         partition_interval_unit="DAY",
+        table_format=ctx.default_table_format,
     )
     input_data = pd.DataFrame(
         [
@@ -730,7 +748,7 @@ def test_insert_overwrite_by_time_partition(ctx: TestContext):
     assert results.non_temp_tables[0] == table.name
     ctx.compare_with_current(table, input_data.iloc[1:])
 
-    if test_type == "df":
+    if ctx.test_type == "df":
         overwrite_data = pd.DataFrame(
             [
                 {"id": 10, ctx.time_column: "2022-01-03"},
@@ -798,7 +816,7 @@ def test_merge(ctx: TestContext):
     assert results.non_temp_tables[0] == table.name
     ctx.compare_with_current(table, input_data)
 
-    if test_type == "df":
+    if ctx.test_type == "df":
         merge_data = pd.DataFrame(
             [
                 {"id": 2, "ds": "2022-01-10"},
@@ -832,6 +850,10 @@ def test_merge(ctx: TestContext):
 
 
 def test_scd_type_2_by_time(ctx: TestContext):
+    # Athena only supports the operations required for SCD models on Iceberg tables
+    if ctx.mark == "athena_hive":
+        pytest.skip("SCD Type 2 is only supported on Athena / Iceberg")
+
     time_type = exp.DataType.build("timestamp")
 
     ctx.columns_to_types = {
@@ -847,10 +869,9 @@ def test_scd_type_2_by_time(ctx: TestContext):
         k: v for k, v in ctx.columns_to_types.items() if k not in ("valid_from", "valid_to")
     }
 
-    # Athena only supports the operations required for SCD models on Iceberg tables
-    table_format = "iceberg" if ctx.dialect == "athena" else None
-
-    ctx.engine_adapter.create_table(table, ctx.columns_to_types, table_format=table_format)
+    ctx.engine_adapter.create_table(
+        table, ctx.columns_to_types, table_format=ctx.default_table_format
+    )
     input_data = pd.DataFrame(
         [
             {"id": 1, "name": "a", "updated_at": "2022-01-01 00:00:00"},
@@ -868,7 +889,7 @@ def test_scd_type_2_by_time(ctx: TestContext):
         execution_time="2023-01-01 00:00:00",
         updated_at_as_valid_from=False,
         columns_to_types=input_schema,
-        table_format=table_format,
+        table_format=ctx.default_table_format,
         truncate=True,
     )
     results = ctx.get_metadata_results()
@@ -930,7 +951,7 @@ def test_scd_type_2_by_time(ctx: TestContext):
         execution_time="2023-01-05 00:00:00",
         updated_at_as_valid_from=False,
         columns_to_types=input_schema,
-        table_format=table_format,
+        table_format=ctx.default_table_format,
         truncate=False,
     )
     results = ctx.get_metadata_results()
@@ -983,6 +1004,10 @@ def test_scd_type_2_by_time(ctx: TestContext):
 
 
 def test_scd_type_2_by_column(ctx: TestContext):
+    # Athena only supports the operations required for SCD models on Iceberg tables
+    if ctx.mark == "athena_hive":
+        pytest.skip("SCD Type 2 is only supported on Athena / Iceberg")
+
     time_type = exp.DataType.build("timestamp")
 
     ctx.columns_to_types = {
@@ -998,10 +1023,9 @@ def test_scd_type_2_by_column(ctx: TestContext):
         k: v for k, v in ctx.columns_to_types.items() if k not in ("valid_from", "valid_to")
     }
 
-    # Athena only supports the operations required for SCD models on Iceberg tables
-    table_format = "iceberg" if ctx.dialect == "athena" else None
-
-    ctx.engine_adapter.create_table(table, ctx.columns_to_types, table_format=table_format)
+    ctx.engine_adapter.create_table(
+        table, ctx.columns_to_types, table_format=ctx.default_table_format
+    )
     input_data = pd.DataFrame(
         [
             {"id": 1, "name": "a", "status": "active"},
@@ -1164,6 +1188,7 @@ def test_get_data_objects(ctx: TestContext):
         {"id": exp.DataType.build("int")},
         table_description="test table description",
         column_descriptions={"id": "test id column description"},
+        table_format=ctx.default_table_format,
     )
     ctx.engine_adapter.create_view(
         view,
@@ -1236,10 +1261,9 @@ def test_truncate_table(ctx: TestContext):
     ctx.init()
     table = ctx.table("test_table")
 
-    # Athena only supports TRUNCATE (DELETE FROM <table>) on Iceberg tables
-    table_format = "iceberg" if ctx.dialect == "athena" else None
-
-    ctx.engine_adapter.create_table(table, ctx.columns_to_types, table_format=table_format)
+    ctx.engine_adapter.create_table(
+        table, ctx.columns_to_types, table_format=ctx.default_table_format
+    )
     input_data = pd.DataFrame(
         [
             {"id": 1, "ds": "2022-01-01"},
@@ -1280,9 +1304,15 @@ def test_transaction(ctx: TestContext):
     ctx.compare_with_current(table, input_data)
 
 
-def test_sushi(mark_gateway: t.Tuple[str, str], ctx: TestContext):
+@sequential
+def test_sushi(ctx: TestContext):
     if ctx.test_type != "query":
         pytest.skip("Sushi end-to-end tests only need to run for query")
+
+    if ctx.mark == "athena_hive":
+        pytest.skip(
+            "Sushi end-to-end tests only need to run once for Athena because sushi needs a hybrid of both Hive and Iceberg"
+        )
 
     config = load_config_from_paths(
         Config,
@@ -1291,12 +1321,11 @@ def test_sushi(mark_gateway: t.Tuple[str, str], ctx: TestContext):
         ],
         personal_paths=[pathlib.Path("~/.sqlmesh/config.yaml").expanduser()],
     )
-    mark, gateway = mark_gateway
 
-    if mark == "athena":
+    if ctx.dialect == "athena":
         # Ensure that this test is using the same s3_warehouse_location as TestContext (which includes the testrun_id)
         config.gateways[
-            gateway
+            ctx.gateway
         ].connection.s3_warehouse_location = ctx.engine_adapter.s3_warehouse_location
 
     # clear cache from prior runs
@@ -1306,7 +1335,7 @@ def test_sushi(mark_gateway: t.Tuple[str, str], ctx: TestContext):
 
         shutil.rmtree(cache_dir)
 
-    context = Context(paths="./examples/sushi", config=config, gateway=gateway)
+    context = Context(paths="./examples/sushi", config=config, gateway=ctx.gateway)
 
     # clean up any leftover schemas from previous runs (requires context)
     for schema in [
@@ -1369,7 +1398,7 @@ def test_sushi(mark_gateway: t.Tuple[str, str], ctx: TestContext):
             context._models.update({model_key: model_ch_cols_to_types})
 
         # create raw schema and view
-        if gateway == "inttest_clickhouse_cluster":
+        if ctx.gateway == "inttest_clickhouse_cluster":
             context.engine_adapter.execute("CREATE DATABASE IF NOT EXISTS raw ON CLUSTER cluster1;")
             context.engine_adapter.execute(
                 "DROP VIEW IF EXISTS raw.demographics ON CLUSTER cluster1;"
@@ -1378,11 +1407,12 @@ def test_sushi(mark_gateway: t.Tuple[str, str], ctx: TestContext):
                 "CREATE VIEW raw.demographics ON CLUSTER cluster1 AS SELECT 1 AS customer_id, '00000' AS zip;"
             )
 
-    # Athena needs models that get mutated after creation to be using Iceberg
     if ctx.dialect == "athena":
         for model_name in {"customer_revenue_lifetime"}:
             model_key = next(k for k in context._models if model_name in k)
-            model = context._models[model_key].copy(update={"table_format": "iceberg"})
+            model = context._models[model_key].copy(
+                update={"table_format": ctx.default_table_format}
+            )
             context._models.update({model_key: model})
 
     plan: Plan = context.plan(
@@ -1629,7 +1659,8 @@ def test_sushi(mark_gateway: t.Tuple[str, str], ctx: TestContext):
         validate_comments("sushi", is_physical_layer=False)
 
 
-def test_init_project(ctx: TestContext, mark_gateway: t.Tuple[str, str], tmp_path: pathlib.Path):
+@sequential
+def test_init_project(ctx: TestContext, tmp_path: pathlib.Path):
     if ctx.test_type != "query":
         pytest.skip("Init example project end-to-end tests only need to run for query")
 
@@ -1667,16 +1698,24 @@ def test_init_project(ctx: TestContext, mark_gateway: t.Tuple[str, str], tmp_pat
     if config.model_defaults.dialect != ctx.dialect:
         config.model_defaults = config.model_defaults.copy(update={"dialect": ctx.dialect})
 
-    mark, gateway = mark_gateway
-
-    if mark == "athena":
+    if ctx.dialect == "athena":
         # Ensure that this test is using the same s3_warehouse_location as TestContext (which includes the testrun_id)
         config.gateways[
-            gateway
+            ctx.gateway
         ].connection.s3_warehouse_location = ctx.engine_adapter.s3_warehouse_location
 
-    context = Context(paths=tmp_path, config=config, gateway=gateway)
+    context = Context(paths=tmp_path, config=config, gateway=ctx.gateway)
     ctx.engine_adapter = context.engine_adapter
+
+    if ctx.default_table_format:
+        # if the default table format is explicitly set, ensure its being used
+        replacement_models = {}
+        for model_key, model in context._models.items():
+            if not model.table_format:
+                replacement_models[model_key] = model.copy(
+                    update={"table_format": ctx.default_table_format}
+                )
+        context._models.update(replacement_models)
 
     # clean up any leftover schemas from previous runs (requires context)
     for schema in [
